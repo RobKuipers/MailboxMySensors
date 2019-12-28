@@ -21,12 +21,17 @@
 * DESCRIPTION
 *
 * Simple deepsleeping mailbox example
-* Connect lid-button or (reed) switch between
-* digital I/O pin LID_PIN (see below) and COMMON_PIN.
 *
-* Connect door-button or (reed) switch between
-* digital I/O pin DOOR_PIN (see below) and COMMON_PIN.
+* Schematics: 
+* sense pin ----- normally closed lid switch ----- probe pin ------ normally closed door switch ---- ground
+*    pin 3                                           pin 4
+* This creates a closed loop between sense and ground when in rest.
+*
+* Alternative if you are not interested in the mailbox door status
+* sense pin ----- normally closed lid switch ----- ground
+*
 */
+#include <Bounce2.h>
 
 // Enable debug Serial.prints to serial monitor
 //#define MY_DEBUG 
@@ -52,15 +57,15 @@
 #include <MySensors.h>
 #include <SPI.h>
 
+
 #define ACK 0        // = false
 #define CHILD_ID_TEMPERATURE 2
 #define CHILD_ID 5
-#define COMMON_PIN 3 // The common pin for the LID and DOOR switch; MUST be an interruptable PIN (2 (in use for RFM69) or 3)
-#define LID_PIN 4    // Arduino Digital I/O pin for button/reed switch
-#define DOOR_PIN 5   // Arduino Digital I/O pin for button/reed switch
+#define SENSE_PIN 3 // The sense pin for the LID and DOOR switch; MUST be an interruptable PIN (2 (in use for RFM69) or 3)
+#define PROBE_PIN 4    // Arduino Digital I/O pin for button/reed switch
 
-//#define SLEEP_IN_MS 21600000 // wake up 4 times a day
-#define SLEEP_IN_MS 3600000 // wake up every hour (for initial reliability testing)
+#define SLEEP_IN_MS 21600000 // wake up 4 times a day
+//#define SLEEP_IN_MS 3600000 // wake up every hour (for initial reliability testing)
 
 int8_t interruptedBy = -1;
 int oldBatLevel;
@@ -69,6 +74,12 @@ float oldTemperature;
 // Change to V_BINARY if you use S_STATUS in presentation below
 MyMessage msg(CHILD_ID, V_TRIPPED);
 MyMessage msgChipTemp(CHILD_ID_TEMPERATURE, V_TEMP);
+
+unsigned long startMillis;
+bool awake = false;
+
+// Instantiate a Bounce object
+Bounce debouncer = Bounce();
 
 void before()
 {
@@ -80,16 +91,14 @@ void before()
 	}
 
 	// Now explicity set pins as needed
-	// Set COMMON pin as input, activate internal pull-up
-	pinMode(COMMON_PIN, INPUT_PULLUP);
+	// Set SENSE pin as input, activate internal pull-up
+	pinMode(SENSE_PIN, INPUT_PULLUP);
+	debouncer.attach(SENSE_PIN, INPUT_PULLUP); // Attach the debouncer to a pin with INPUT_PULLUP mode
+	debouncer.interval(25); // Use a debounce interval of 25 milliseconds
 
-	// Setup lid switch as output with state LOW
-	pinMode(LID_PIN, OUTPUT);
-	digitalWrite(LID_PIN, LOW);
+	// Setup PROBE pin as an open loop
+	pinMode(PROBE_PIN, INPUT);
 
-	// Setup door switch as output with state LOW
-	pinMode(DOOR_PIN, OUTPUT);
-	digitalWrite(DOOR_PIN, LOW);
 }
 
 void setup()
@@ -134,12 +143,12 @@ long readVcc() {
 }
 
 void presentation() {
-	sendSketchInfo("Mailbox", "1.6", ACK);
+	sendSketchInfo("Mailbox", "2.0", ACK);
 
 	// Register binary input sensor to gw (they will be created as child devices)
 	// You can use S_DOOR, S_MOTION or S_STATUS here depending on your usage. 
 	// If S_STATUS is used, remember to update variable type you send in. See "msg" above.
-	present(CHILD_ID, S_DOOR, ACK);
+	present(CHILD_ID, S_DOOR, "", ACK);
 	present(CHILD_ID_TEMPERATURE, S_TEMP);
 
 }
@@ -147,48 +156,49 @@ void presentation() {
 //  Check if digital input has changed and send in new value
 void loop()
 {
-	if (interruptedBy == digitalPinToInterrupt(COMMON_PIN))
+	if (!awake)
 	{
-		bool gotState = false;
-		int numLoops = 10;  // prevent eternal loop if state could not be determined (unlikely, but still)
+		startMillis = millis();
+		awake = true;
+	}
+	
+    if (interruptedBy == digitalPinToInterrupt(SENSE_PIN))
+	{
+		// Update the Bounce instance :
+		debouncer.update();
 
-		do
-		{
-			// Interrupted; find out by which switch
-			digitalWrite(LID_PIN, HIGH);
-			wait(5);
-			// Test if COMMON_PIN stays LOW now
-			if (digitalReadFast(COMMON_PIN) == LOW) {
+		if (debouncer.rose()) {
+			// Interrupted; find out by which switch 
+			// Make PROBE pin an LOW output
+			digitalWriteFast(PROBE_PIN, LOW);
+			pinMode(PROBE_PIN, OUTPUT);
+
+			// Test if SENSE_PIN goes LOW now
+			if (digitalReadFast(SENSE_PIN) == LOW) {
 				// Then this must be the DOOR switch
-				Sprintln(F("Mailbox has been emptied"));
+				Sprintln(F("It's the DOOR switch"));
 				send(msg.set(false), ACK);
-
-				gotState = true;
-				digitalWrite(LID_PIN, LOW);
 			}
 			else
 			{
-				// Interrupted; find out by which switch
-				digitalWrite(DOOR_PIN, HIGH);
-				wait(5);
-				// Test if COMMON_PIN stays LOW now
-				if (digitalReadFast(COMMON_PIN) == LOW) {
-					// Then this must be the LID switch
-					Sprintln(F("New mail received"));
-					send(msg.set(true), ACK);
-
-					gotState = true;
-					digitalWrite(DOOR_PIN, LOW);
-				}
+				// Then this must be the LID switch
+				Sprintln(F("It's the LID Switch"));
+				send(msg.set(true), ACK);
 			}
-			numLoops--;
-		} while (!gotState && numLoops > 0);
+			// Make PROBE pin an open loop
+			pinMode(PROBE_PIN, INPUT);
 
-		wait(500);
+			wait(20);
+		}
+	} 
 
-	}
-	else
-	{
+	// Stay awake for 5 seconds
+	if ((millis() - startMillis) > 5000) {
+		awake = false;
+		Sprintln(F("Going to sleep (send temp/bat first)"));
+
+		// Before sleeping...
+		// Send temperature
 		float newTemp = readTemp();
 		if (oldTemperature != newTemp)
 		{
@@ -196,20 +206,16 @@ void loop()
 			oldTemperature = newTemp;
 		}
 
-	}
+		// Send battery level
+		int batLevel = getBatteryLevel();
+		if (oldBatLevel != batLevel)
+		{
+			sendBatteryLevel(batLevel, ACK);
+			oldBatLevel = batLevel;
+		}
 
-	// Changed to: ALWAYS SEND BAT LEVEL
-	// if (interruptedBy==-1) // Timeout on sleep (once a day)
-	// {
-	int batLevel = getBatteryLevel();
-	if (oldBatLevel != batLevel)
-	{
-		sendBatteryLevel(batLevel, ACK);
-		oldBatLevel = batLevel;
+		interruptedBy = smartSleep(digitalPinToInterrupt(SENSE_PIN), RISING, SLEEP_IN_MS);
 	}
-	// }
-
-	interruptedBy = smartSleep(digitalPinToInterrupt(LID_PIN), FALLING, SLEEP_IN_MS);
 }
 
 void receive(const MyMessage &message) {
@@ -249,9 +255,4 @@ long readMUX(uint8_t aControl)
 	result = ADCL;
 	result |= ADCH << 8;
 	return result;
-}
-
-
-// Utter nonsense, but needed for attaching an interrupt to...
-void debounce() {
 }
