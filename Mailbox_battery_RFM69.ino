@@ -22,10 +22,10 @@
 *
 * Simple deepsleeping mailbox example
 * Connect lid-button or (reed) switch between
-* digital I/O pin 3 (LID_PIN below) and GND.
+* digital I/O pin LID_PIN (see below) and COMMON_PIN.
 *
 * Connect door-button or (reed) switch between
-* digital I/O pin 2 (DOOR_PIN below) and GND.
+* digital I/O pin DOOR_PIN (see below) and COMMON_PIN.
 */
 
 // Enable debug Serial.prints to serial monitor
@@ -55,8 +55,9 @@
 #define ACK 0        // = false
 #define CHILD_ID_TEMPERATURE 2
 #define CHILD_ID 5
-#define LID_PIN 3    // Arduino Digital I/O pin for button/reed switch
-#define DOOR_PIN 4   // Arduino Digital I/O pin for button/reed switch
+#define COMMON_PIN 3 // The common pin for the LID and DOOR switch; MUST be an interruptable PIN (2 (in use for RFM69) or 3)
+#define LID_PIN 4    // Arduino Digital I/O pin for button/reed switch
+#define DOOR_PIN 5   // Arduino Digital I/O pin for button/reed switch
 
 //#define SLEEP_IN_MS 21600000 // wake up 4 times a day
 #define SLEEP_IN_MS 3600000 // wake up every hour (for initial reliability testing)
@@ -79,12 +80,16 @@ void before()
 	}
 
 	// Now explicity set pins as needed
+	// Set COMMON pin as input, activate internal pull-up
+	pinMode(COMMON_PIN, INPUT_PULLUP);
 
-	// Setup lid switch, activate internal pull-up
-	pinMode(LID_PIN, INPUT_PULLUP);
+	// Setup lid switch as output with state LOW
+	pinMode(LID_PIN, OUTPUT);
+	digitalWrite(LID_PIN, LOW);
 
-	// Setup door switch, activate internal pull-up
-	pinMode(DOOR_PIN, INPUT_PULLUP);
+	// Setup door switch as output with state LOW
+	pinMode(DOOR_PIN, OUTPUT);
+	digitalWrite(DOOR_PIN, LOW);
 }
 
 void setup()
@@ -142,14 +147,45 @@ void presentation() {
 //  Check if digital input has changed and send in new value
 void loop()
 {
-	if (interruptedBy == digitalPinToInterrupt(LID_PIN))
+	if (interruptedBy == digitalPinToInterrupt(COMMON_PIN))
 	{
-		// Little trick for debouncing the switch
-		attachInterrupt(digitalPinToInterrupt(LID_PIN), debounce, RISING);
+		bool gotState = false;
+		int numLoops = 10;  // prevent eternal loop if state could not be determined (unlikely, but still)
+
+		do
+		{
+			// Interrupted; find out by which switch
+			digitalWrite(LID_PIN, HIGH);
+			wait(5);
+			// Test if COMMON_PIN stays LOW now
+			if (digitalReadFast(COMMON_PIN) == LOW) {
+				// Then this must be the DOOR switch
+				Sprintln(F("Mailbox has been emptied"));
+				send(msg.set(false), ACK);
+
+				gotState = true;
+				digitalWrite(LID_PIN, LOW);
+			}
+			else
+			{
+				// Interrupted; find out by which switch
+				digitalWrite(DOOR_PIN, HIGH);
+				wait(5);
+				// Test if COMMON_PIN stays LOW now
+				if (digitalReadFast(COMMON_PIN) == LOW) {
+					// Then this must be the LID switch
+					Sprintln(F("New mail received"));
+					send(msg.set(true), ACK);
+
+					gotState = true;
+					digitalWrite(DOOR_PIN, LOW);
+				}
+			}
+			numLoops--;
+		} while (!gotState && numLoops > 0);
+
 		wait(500);
 
-		Sprintln(F("New mail received"));
-		send(msg.set(true), ACK);
 	}
 	else
 	{
@@ -162,12 +198,6 @@ void loop()
 
 	}
 
-	//if (interruptedBy == digitalPinToInterrupt(DOOR_PIN))
-	//{
-	//	Serial.println(F("Mailbox has been emptied"));
-	//	send(msg.set(false), ACK);
-	//}
-
 	// Changed to: ALWAYS SEND BAT LEVEL
 	// if (interruptedBy==-1) // Timeout on sleep (once a day)
 	// {
@@ -179,7 +209,7 @@ void loop()
 	}
 	// }
 
-	interruptedBy = smartSleep(/* digitalPinToInterrupt(DOOR_PIN),  FALLING,*/ digitalPinToInterrupt(LID_PIN), FALLING, SLEEP_IN_MS);
+	interruptedBy = smartSleep(digitalPinToInterrupt(LID_PIN), FALLING, SLEEP_IN_MS);
 }
 
 void receive(const MyMessage &message) {
