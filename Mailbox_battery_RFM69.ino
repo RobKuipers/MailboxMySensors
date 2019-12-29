@@ -22,7 +22,7 @@
 *
 * Simple deepsleeping mailbox example
 *
-* Schematics: 
+* Schematics:
 * sense pin ----- normally closed lid switch ----- probe pin ------ normally closed door switch ---- ground
 *    pin 3                                           pin 4
 * This creates a closed loop between sense and ground when in rest.
@@ -31,6 +31,7 @@
 * sense pin ----- normally closed lid switch ----- ground
 *
 */
+#include "DS18B20.h"
 #include <Bounce2.h>
 
 // Enable debug Serial.prints to serial monitor
@@ -64,12 +65,12 @@
 #define SENSE_PIN 3 // The sense pin for the LID and DOOR switch; MUST be an interruptable PIN (2 (in use for RFM69) or 3)
 #define PROBE_PIN 4    // Arduino Digital I/O pin for button/reed switch
 
-#define SLEEP_IN_MS 21600000 // wake up 4 times a day
-//#define SLEEP_IN_MS 3600000 // wake up every hour (for initial reliability testing)
+#define SLEEP_IN_MS 3600000 // wake up every hour
 
 int8_t interruptedBy = -1;
 int oldBatLevel;
 float oldTemperature;
+int countInterrupts = -1;
 
 // Change to V_BINARY if you use S_STATUS in presentation below
 MyMessage msg(CHILD_ID, V_TRIPPED);
@@ -80,6 +81,9 @@ bool awake = false;
 
 // Instantiate a Bounce object
 Bounce debouncer = Bounce();
+bool pinInterruptHandled = false;
+
+DS18B20 Sensor;  // Insert the three legs of the sensor into GND, Pin 5 (Vcc), and Pin 6(Data). 
 
 void before()
 {
@@ -99,6 +103,12 @@ void before()
 	// Setup PROBE pin as an open loop
 	pinMode(PROBE_PIN, INPUT);
 
+	// Setup Temp Sensor
+	// Timer 2 initialization from wiring.c for an ATmega 328P (Arduino Uno rev 3) + 20 bytes to sketch size
+	TCCR2A |= _BV(COM2A1) | _BV(WGM20);    // Enable timer 2 to _delay_ms() works properly
+	TCCR2B |= CS22;                        // set clkT2S/64 (From prescaler)
+
+	pinMode(5, INPUT);    // Supply no power to DS18B20 at this moment
 }
 
 void setup()
@@ -160,14 +170,15 @@ void loop()
 	{
 		startMillis = millis();
 		awake = true;
+		Sprintln(F("Awoken by interrupt (pin or timer)"));
 	}
-	
-    if (interruptedBy == digitalPinToInterrupt(SENSE_PIN))
+
+	if (interruptedBy == digitalPinToInterrupt(SENSE_PIN))
 	{
 		// Update the Bounce instance :
 		debouncer.update();
-
-		if (debouncer.rose()) {
+		
+		if (!pinInterruptHandled && debouncer.rose()) {
 			// Interrupted; find out by which switch 
 			// Make PROBE pin an LOW output
 			digitalWriteFast(PROBE_PIN, LOW);
@@ -187,38 +198,69 @@ void loop()
 			}
 			// Make PROBE pin an open loop
 			pinMode(PROBE_PIN, INPUT);
-
-			wait(20);
+			pinInterruptHandled = true;
 		}
-	} 
+	}
 
-	// Stay awake for 5 seconds
-	if ((millis() - startMillis) > 5000) {
+
+	// Stay awake for 3 seconds; or longer if SENSE pin has not gone LOW yet
+	if ((millis() - startMillis) > 3000 && (!(interruptedBy == digitalPinToInterrupt(SENSE_PIN)) || debouncer.read() == LOW)) {
 		awake = false;
-		Sprintln(F("Going to sleep (send temp/bat first)"));
+		pinInterruptHandled = false;
 
-		// Before sleeping...
-		// Send temperature
-		float newTemp = readTemp();
-		if (oldTemperature != newTemp)
-		{
-			send(msgChipTemp.set(newTemp, 1), ACK);
-			oldTemperature = newTemp;
+		Sprintln(F("Initializing sleep..."));
+
+		if (interruptedBy != MY_SLEEP_NOT_POSSIBLE) {
+			// Before sleeping...
+			// Send temperature
+			digitalWriteFast(5, HIGH);
+			pinMode(5, OUTPUT);
+			wait(20);
+
+			// Set the sensor's resolution to 11 bits
+			Sensor.SetResolution(11);
+
+			Sensor.StartConversion();
+
+			wait(800);
+			uint16_t temp = Sensor.GetTemperature();
+
+			digitalWriteFast(5, LOW);
+			pinMode(5, INPUT);
+
+			float newTemp = temp;
+			newTemp = newTemp / 100;   // Strange 'trick' to get the decimals right
+			if (oldTemperature != newTemp && temp != 8500)
+			{
+				Sprintln(F("Send temperature first"));
+				send(msgChipTemp.set(newTemp, 1), ACK);
+				oldTemperature = newTemp;
+			}
+
+			countInterrupts++;
+			// Send bat level AT LEAST every 24 hrs (or more often when mailbox has been triggered)
+			if (countInterrupts % 24 == 0) {
+				Sprintln(F("Send battery level first"));
+				int batLevel = getBatteryLevel();
+				if (oldBatLevel != batLevel)
+				{
+					sendBatteryLevel(batLevel, ACK);
+					oldBatLevel = batLevel;
+				}
+
+			}
 		}
+		wait(1000); // Because I'm not using smartSleep; some extra time
+		Sprintln(F("Entering sleep now"));
 
-		// Send battery level
-		int batLevel = getBatteryLevel();
-		if (oldBatLevel != batLevel)
-		{
-			sendBatteryLevel(batLevel, ACK);
-			oldBatLevel = batLevel;
-		}
-
-		interruptedBy = smartSleep(digitalPinToInterrupt(SENSE_PIN), RISING, SLEEP_IN_MS);
+		// Do NOT use smartSleep; this send an awake message to the controller. This takes valuable time, during which
+		// the sensing of the Pins cannot be done.
+		// Also, since this is a send-only node it has no benefits.
+		interruptedBy = sleep(digitalPinToInterrupt(SENSE_PIN), RISING, SLEEP_IN_MS);
 	}
 }
 
-void receive(const MyMessage &message) {
+void receive(const MyMessage& message) {
 	// We only expect one type of message from controller. But we better check anyway.
 	if (message.isAck()) {
 		Sprintln(F("This is an ack from gateway"));
@@ -232,27 +274,4 @@ void receive(const MyMessage &message) {
 		Sprint(F(", New status: "));
 		Sprintln(message.getBool());
 	}
-}
-
-float readTemp()
-{
-#if defined (xxMY_RADIO_RFM69) && !defined(MY_RFM69_NEW_DRIVER)
-	return _radio.readTemperature(-3);
-#else
-	// Read 1.1V reference against MUX3  
-	return (readMUX(_BV(REFS1) | _BV(REFS0) | _BV(MUX3)) - 125) * 0.1075f;
-#endif
-}
-
-long readMUX(uint8_t aControl)
-{
-	long result;
-
-	ADMUX = aControl;
-	delay(20); // Wait for Vref to settle
-	ADCSRA |= _BV(ADSC); // Convert
-	while (bit_is_set(ADCSRA, ADSC));
-	result = ADCL;
-	result |= ADCH << 8;
-	return result;
 }
