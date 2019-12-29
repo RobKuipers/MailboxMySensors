@@ -31,7 +31,7 @@
 * sense pin ----- normally closed lid switch ----- ground
 *
 */
-#include "DS18B20.h"
+//#include "DS18B20.h"
 #include <Bounce2.h>
 
 // Enable debug Serial.prints to serial monitor
@@ -74,7 +74,7 @@ int countInterrupts = -1;
 
 // Change to V_BINARY if you use S_STATUS in presentation below
 MyMessage msg(CHILD_ID, V_TRIPPED);
-MyMessage msgChipTemp(CHILD_ID_TEMPERATURE, V_TEMP);
+//MyMessage msgChipTemp(CHILD_ID_TEMPERATURE, V_TEMP);
 
 unsigned long startMillis;
 bool awake = false;
@@ -83,7 +83,7 @@ bool awake = false;
 Bounce debouncer = Bounce();
 bool pinInterruptHandled = false;
 
-DS18B20 Sensor;  // Insert the three legs of the sensor into GND, Pin 5 (Vcc), and Pin 6(Data). 
+//DS18B20 Sensor;  // Insert the three legs of the sensor into GND, Pin 5 (Vcc), and Pin 6(Data). 
 
 void before()
 {
@@ -103,12 +103,12 @@ void before()
 	// Setup PROBE pin as an open loop
 	pinMode(PROBE_PIN, INPUT);
 
-	// Setup Temp Sensor
-	// Timer 2 initialization from wiring.c for an ATmega 328P (Arduino Uno rev 3) + 20 bytes to sketch size
-	TCCR2A |= _BV(COM2A1) | _BV(WGM20);    // Enable timer 2 to _delay_ms() works properly
-	TCCR2B |= CS22;                        // set clkT2S/64 (From prescaler)
-
-	pinMode(5, INPUT);    // Supply no power to DS18B20 at this moment
+	//// Setup Temp Sensor
+	//// Timer 2 initialization from wiring.c for an ATmega 328P (Arduino Uno rev 3) + 20 bytes to sketch size
+	//TCCR2A |= _BV(COM2A1) | _BV(WGM20);    // Enable timer 2 to _delay_ms() works properly
+	//TCCR2B |= CS22;                        // set clkT2S/64 (From prescaler)
+	//
+	//pinMode(5, INPUT);    // Supply no power to DS18B20 at this moment
 }
 
 void setup()
@@ -153,7 +153,7 @@ long readVcc() {
 }
 
 void presentation() {
-	sendSketchInfo("Mailbox", "2.0", ACK);
+	sendSketchInfo("Mailbox", "2.1", ACK);
 
 	// Register binary input sensor to gw (they will be created as child devices)
 	// You can use S_DOOR, S_MOTION or S_STATUS here depending on your usage. 
@@ -212,30 +212,30 @@ void loop()
 
 		if (interruptedBy != MY_SLEEP_NOT_POSSIBLE) {
 			// Before sleeping...
-			// Send temperature
-			digitalWriteFast(5, HIGH);
-			pinMode(5, OUTPUT);
-			wait(20);
+		//	// Send temperature
+		//	digitalWriteFast(5, HIGH);
+		//	pinMode(5, OUTPUT);
+		//	wait(20);
 
-			// Set the sensor's resolution to 11 bits
-			Sensor.SetResolution(11);
+		//	// Set the sensor's resolution to 11 bits
+		//	Sensor.SetResolution(11);
 
-			Sensor.StartConversion();
+		//	Sensor.StartConversion();
 
-			wait(800);
-			uint16_t temp = Sensor.GetTemperature();
+		//	wait(800);
+		//	uint16_t temp = Sensor.GetTemperature();
 
-			digitalWriteFast(5, LOW);
-			pinMode(5, INPUT);
+		//	digitalWriteFast(5, LOW);
+		//	pinMode(5, INPUT);
 
-			float newTemp = temp;
-			newTemp = newTemp / 100;   // Strange 'trick' to get the decimals right
-			if (oldTemperature != newTemp && temp != 8500)
-			{
-				Sprintln(F("Send temperature first"));
-				send(msgChipTemp.set(newTemp, 1), ACK);
-				oldTemperature = newTemp;
-			}
+		//	float newTemp = temp;
+		//	newTemp = newTemp / 100;   // Strange 'trick' to get the decimals right
+		//	if (oldTemperature != newTemp && temp != 8500)
+		//	{
+		//		Sprintln(F("Send temperature first"));
+		//		send(msgChipTemp.set(newTemp, 1), ACK);
+		//		oldTemperature = newTemp;
+		//	}
 
 			countInterrupts++;
 			// Send bat level AT LEAST every 24 hrs (or more often when mailbox has been triggered)
